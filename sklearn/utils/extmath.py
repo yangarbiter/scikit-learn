@@ -869,5 +869,5 @@ def stable_cumsum(arr, axis=None, rtol=1e-05, atol=1e-08):
                              atol=atol, equal_nan=True)):
         warnings.warn('cumsum was found to be unstable: '
                       'its last element does not correspond to sum',
-                      ConvergenceWarning)
+                      RuntimeWarning)
     return out

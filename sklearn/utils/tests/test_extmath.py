@@ -656,7 +656,7 @@ def test_stable_cumsum():
         raise SkipTest("Sum is as unstable as cumsum for numpy < 1.9")
     assert_array_equal(stable_cumsum([1, 2, 3]), np.cumsum([1, 2, 3]))
     r = np.random.RandomState(0).rand(100000)
-    assert_warns(ConvergenceWarning, stable_cumsum, r, rtol=0, atol=0)
+    assert_warns(RuntimeWarning, stable_cumsum, r, rtol=0, atol=0)
 
     # test axis parameter
     A = np.random.RandomState(36).randint(1000, size=(5, 5, 5))
