@@ -1729,7 +1729,7 @@ cdef class RobustSplitter(BaseDenseSplitter):
         _init_split(&best, end)
 
         for i in range(start, end):
-            if <SIZE_t>self.y[i] == 0: N0 += 1
+            if <int>self.y[i] == 0: N0 += 1
             else: N1 += 1
 
         for f_j in range(n_features):
@@ -1758,15 +1758,15 @@ cdef class RobustSplitter(BaseDenseSplitter):
                 n10=0
                 n11=0
                 for i in range(n_n):
-                    if <SIZE_t>self.y[In[i]] == 0: n00 += 1
+                    if <int>self.y[In[i]] == 0: n00 += 1
                     else: n01 += 1
                 for i in range(n_p):
-                    if <SIZE_t>self.y[Ip[i]] == 0: n10 += 1
+                    if <int>self.y[Ip[i]] == 0: n10 += 1
                     else: n11 += 1
 
                 ####################### get dn0s, dn1s
                 for dn0 in range(n_n):
-                    if <SIZE_t>self.y[Id[dn0]] == 1:
+                    if <int>self.y[Id[dn0]] == 1:
                         continue
                     ce = <SIZE_t>(N1*(n00 + dn0)/N0 + 0.5) + n01
                     fl = <SIZE_t>(N1*(n00 + dn0)/N0 - 0.5) + n01
@@ -1809,7 +1809,7 @@ cdef class RobustSplitter(BaseDenseSplitter):
                 samples[p] = In[i]
                 p += 1
             for i in range(n_d):
-                if <SIZE_t>self.y[Id[i]] == 0:
+                if <int>self.y[Id[i]] == 0:
                     if best_dn0 > 0:
                         samples[p] = Id[i]
                         p += 1
