@@ -20,6 +20,7 @@ from ._criterion cimport Criterion
 
 from libc.stdlib cimport free
 from libc.stdlib cimport qsort
+from libc.stdlib cimport abs
 from libc.string cimport memcpy
 from libc.string cimport memset
 
@@ -263,7 +264,8 @@ cdef class BaseDenseSplitter(Splitter):
                   object X,
                   DOUBLE_t[:, ::1] y,
                   DOUBLE_t* sample_weight,
-                  np.ndarray X_idx_sorted=None) except -1:
+                  np.ndarray X_idx_sorted=None,
+                  DOUBLE_t eps=0.1) except -1:
         """Initialize the splitter
 
         Returns -1 in case of failure to allocate memory (and raise MemoryError)
@@ -274,6 +276,7 @@ cdef class BaseDenseSplitter(Splitter):
         Splitter.init(self, X, y, sample_weight)
 
         self.X = X
+        self.eps = eps
 
         if self.presort == 1:
             self.X_idx_sorted = X_idx_sorted
@@ -1626,6 +1629,225 @@ cdef class RandomSparseSplitter(BaseSparseSplitter):
         memcpy(constant_features + n_known_constants,
                features + n_known_constants,
                sizeof(SIZE_t) * n_found_constants)
+
+        # Return values
+        split[0] = best
+        n_constant_features[0] = n_total_constants
+        return 0
+
+cdef class RobustSplitter(BaseDenseSplitter):
+    """Splitter for finding the best split."""
+    def __reduce__(self):
+        return (RobustSplitter, (self.criterion,
+                               self.max_features,
+                               self.min_samples_leaf,
+                               self.min_weight_leaf,
+                               self.random_state,
+                               self.presort), self.__getstate__())
+
+    cdef int node_split(self, double impurity, SplitRecord* split,
+                        SIZE_t* n_constant_features) nogil except -1:
+        """Find the best split on node samples[start:end]
+
+        Returns -1 in case of failure to allocate memory (and raise MemoryError)
+        or 0 otherwise.
+        """
+        # Find the best split
+        cdef SIZE_t* samples = self.samples
+        cdef SIZE_t start = self.start
+        cdef SIZE_t end = self.end
+
+        cdef SIZE_t* features = self.features
+        cdef SIZE_t* constant_features = self.constant_features
+        cdef SIZE_t n_features = self.n_features
+
+        cdef DTYPE_t* Xf = self.feature_values
+        cdef SIZE_t max_features = self.max_features
+        cdef SIZE_t min_samples_leaf = self.min_samples_leaf
+        cdef double min_weight_leaf = self.min_weight_leaf
+        cdef UINT32_t* random_state = &self.rand_r_state
+
+        cdef INT32_t* X_idx_sorted = self.X_idx_sorted_ptr
+        cdef SIZE_t* sample_mask = self.sample_mask
+
+        cdef SplitRecord best, current
+        cdef double current_proxy_improvement = -INFINITY
+        cdef double best_proxy_improvement = -INFINITY
+
+        cdef SIZE_t f_i = n_features
+        cdef SIZE_t f_j
+        cdef SIZE_t tmp
+        cdef SIZE_t p
+        cdef SIZE_t feature_idx_offset
+        cdef SIZE_t feature_offset
+        cdef SIZE_t i
+        cdef SIZE_t j
+
+        cdef SIZE_t n_visited_features = 0
+        # Number of features discovered to be constant during the split search
+        cdef SIZE_t n_found_constants = 0
+        # Number of features known to be constant and drawn without replacement
+        cdef SIZE_t n_drawn_constants = 0
+        cdef SIZE_t n_known_constants = n_constant_features[0]
+        # n_total_constants = n_known_constants + n_found_constants
+        cdef SIZE_t n_total_constants = n_known_constants
+        cdef DTYPE_t current_feature_value
+        cdef SIZE_t partition_end
+
+        cdef double eps = self.eps
+        cdef SIZE_t* Id=NULL
+        cdef SIZE_t* Ip=NULL
+        cdef SIZE_t* In=NULL
+        cdef SIZE_t n_d=0
+        cdef SIZE_t n_p=0
+        cdef SIZE_t n_n=0
+
+        cdef SIZE_t n_samples = end - start
+        cdef double min_diff=INFINITY
+        cdef SIZE_t ce
+        cdef SIZE_t fl
+        cdef SIZE_t n00
+        cdef SIZE_t n01
+        cdef SIZE_t N0=0
+        cdef SIZE_t N1=0
+        cdef SIZE_t dn1p
+        cdef SIZE_t n10
+        cdef SIZE_t n11
+
+        cdef SIZE_t best_dn0
+        cdef SIZE_t best_dn1
+        cdef SIZE_t dn0
+        cdef SIZE_t dn1,
+        cdef SIZE_t best_j
+        cdef double best_score=0
+        cdef double score
+
+        safe_realloc(&Id, end - start)
+        safe_realloc(&Ip, end - start)
+        safe_realloc(&In, end - start)
+
+        _init_split(&best, end)
+
+        for i in range(start, end):
+            if <SIZE_t>self.y[i] == 0: N0 += 1
+            else: N1 += 1
+
+        for f_j in range(n_features):
+            current.feature = features[f_j]
+
+            for i in range(start, end):
+                Xf[i] = self.X[samples[i], current.feature]
+            sort(Xf + start, samples + start, end - start)
+
+            for f_i in range(start, end-1):
+                current.threshold = (Xf[f_i] + Xf[f_i+1]) / 2
+
+                for i in range(start, end):
+                    if Xf[i] < current.threshold - eps:
+                        In[n_n] = i
+                        n_n += 1
+                    elif Xf[i] > current.threshold + eps:
+                        Ip[n_p] = i
+                        n_p += 1
+                    else:
+                        Id[n_d] = i
+                        n_d += 1
+
+                n00=0
+                n01=0
+                n10=0
+                n11=0
+                for i in range(n_n):
+                    if <SIZE_t>self.y[In[i]] == 0: n00 += 1
+                    else: n01 += 1
+                for i in range(n_p):
+                    if <SIZE_t>self.y[Ip[i]] == 0: n10 += 1
+                    else: n11 += 1
+
+                ####################### get dn0s, dn1s
+                for dn0 in range(n_n):
+                    if <SIZE_t>self.y[Id[dn0]] == 1:
+                        continue
+                    ce = <SIZE_t>(N1*(n00 + dn0)/N0 + 0.5) + n01
+                    fl = <SIZE_t>(N1*(n00 + dn0)/N0 - 0.5) + n01
+
+                    for dn1p in range(ce, fl):
+                        dn1 = max(min(dn1p, n00), 0)
+                        if min_diff > abs((dn0+n00)/N0 - (dn1+n01)/N1):
+                            best_dn0 = dn0
+                            best_dn1 = dn1
+                            min_diff = abs((dn0+n00)/N0 - (dn1+n01)/N1)
+                #######################
+            
+                score = (
+                        - (n_n + best_dn0) / n_samples * log((n_n + best_dn0) / n_samples) \
+                        - (n_p + best_dn1) / n_samples * log((n_p + best_dn1) / n_samples)
+                    ) - (
+                        (n_n + best_dn0) / n_samples * (
+                            ((n00 + best_dn0) / n_samples) * log((n00 + best_dn0) / n_samples) \
+                            + ((n01 + best_dn1) / n_samples) * log((n01 + best_dn1) / n_samples)
+                        ) - (n_p + best_dn1) / n_samples * (
+                            ((n10 + best_dn0) / n_samples) * log((n10 + best_dn0) / n_samples) \
+                            + ((n11 + best_dn1) / n_samples) * log((n11 + best_dn1) / n_samples)
+                        )
+                    )
+                current.feature = f_j
+                current.pos = f_i
+
+                if (((current.pos - start) < min_samples_leaf) or
+                    ((end - current.pos) < min_samples_leaf)):
+                    continue
+
+                if best_score < score:
+                    best = current  # copy
+
+
+        # Reorganize into samples[start:best.pos] + samples[best.pos:end]
+        if best.pos < end:
+            p = 0
+            for i in range(n_n):
+                samples[p] = In[i]
+                p += 1
+            for i in range(n_d):
+                if <SIZE_t>self.y[Id[i]] == 0:
+                    if best_dn0 > 0:
+                        samples[p] = Id[i]
+                        p += 1
+                        best_dn0 -= 1
+                    else:
+                        Ip[n_p] = Id[i]
+                        n_p += 1
+                else:
+                    if best_dn1 > 0:
+                        samples[p] = Id[i]
+                        p += 1
+                        best_dn1 -= 1
+                    else:
+                        Ip[n_p] = Id[i]
+                        n_p += 1
+            for i in range(n_p):
+                samples[p] = Ip[i]
+                p += 1
+
+            #self.criterion.reset()
+            #self.criterion.update(best.pos)
+            #best.improvement = self.criterion.impurity_improvement(impurity)
+            #self.criterion.children_impurity(&best.impurity_left,
+            #                                 &best.impurity_right)
+
+        # Respect invariant for constant features: the original order of
+        # element in features[:n_known_constants] must be preserved for sibling
+        # and child nodes
+        #memcpy(features, constant_features, sizeof(SIZE_t) * n_known_constants)
+
+        # Copy newly found constant features
+        #memcpy(constant_features + n_known_constants,
+        #       features + n_known_constants,
+        #       sizeof(SIZE_t) * n_found_constants)
+
+        free(Id)
+        free(Ip)
+        free(In)
 
         # Return values
         split[0] = best

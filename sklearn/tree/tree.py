@@ -61,7 +61,8 @@ CRITERIA_REG = {"mse": _criterion.MSE, "friedman_mse": _criterion.FriedmanMSE,
                 "mae": _criterion.MAE}
 
 DENSE_SPLITTERS = {"best": _splitter.BestSplitter,
-                   "random": _splitter.RandomSplitter}
+                   "random": _splitter.RandomSplitter,
+                   "robust": _splitter.RobustSplitter}
 
 SPARSE_SPLITTERS = {"best": _splitter.BestSparseSplitter,
                     "random": _splitter.RandomSparseSplitter}
@@ -92,7 +93,8 @@ class BaseDecisionTree(BaseEstimator, MultiOutputMixin, metaclass=ABCMeta):
                  min_impurity_decrease,
                  min_impurity_split,
                  class_weight=None,
-                 presort=False):
+                 presort=False,
+                 eps=0.1):
         self.criterion = criterion
         self.splitter = splitter
         self.max_depth = max_depth
@@ -106,6 +108,7 @@ class BaseDecisionTree(BaseEstimator, MultiOutputMixin, metaclass=ABCMeta):
         self.min_impurity_split = min_impurity_split
         self.class_weight = class_weight
         self.presort = presort
+        self.eps = eps
 
     def get_depth(self):
         """Returns the depth of the decision tree.
@@ -356,7 +359,8 @@ class BaseDecisionTree(BaseEstimator, MultiOutputMixin, metaclass=ABCMeta):
                                                 min_samples_leaf,
                                                 min_weight_leaf,
                                                 random_state,
-                                                self.presort)
+                                                self.presort,
+                                                eps=self.eps)
 
         self.tree_ = Tree(self.n_features_, self.n_classes_, self.n_outputs_)
 
