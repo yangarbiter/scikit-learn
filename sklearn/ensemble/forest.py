@@ -117,6 +117,7 @@ def _parallel_build_trees(tree, forest, X, y, sample_weight, tree_idx, n_trees,
 
         tree.fit(X, y, sample_weight=curr_sample_weight, check_input=False)
     else:
+        #print(len(np.))
         tree.fit(X, y, sample_weight=sample_weight, check_input=False)
 
     return tree
@@ -322,12 +323,21 @@ class BaseForest(BaseEnsemble, MultiOutputMixin, metaclass=ABCMeta):
             # that case. However, for joblib 0.12+ we respect any
             # parallel_backend contexts set at a higher level,
             # since correctness does not rely on using threads.
-            trees = Parallel(n_jobs=self.n_jobs, verbose=self.verbose,
-                             **_joblib_parallel_args(prefer='threads'))(
-                delayed(_parallel_build_trees)(
-                    t, self, X, y, sample_weight, i, len(trees),
-                    verbose=self.verbose, class_weight=self.class_weight)
-                for i, t in enumerate(trees))
+            #trees = Parallel(n_jobs=self.n_jobs, verbose=self.verbose,
+            #                 **_joblib_parallel_args(prefer='threads'))(
+            #    delayed(_parallel_build_trees)(
+            #        t, self, X, y, sample_weight, i, len(trees),
+            #        verbose=self.verbose, class_weight=self.class_weight)
+            #    for i, t in enumerate(trees))
+
+            _trees = []
+            for i, t in enumerate(trees):
+                _trees.append(
+                    _parallel_build_trees(
+                        t, self, X, y, sample_weight, i, len(trees),
+                        verbose=self.verbose, class_weight=self.class_weight)
+                )
+            trees = _trees
 
             # Collect newly grown trees
             self.estimators_.extend(trees)
@@ -1007,7 +1017,9 @@ class RandomForestClassifier(ForestClassifier):
                  random_state=None,
                  verbose=0,
                  warm_start=False,
-                 class_weight=None):
+                 class_weight=None,
+                 splitter="best",
+                 eps=0.1):
         super().__init__(
             base_estimator=DecisionTreeClassifier(),
             n_estimators=n_estimators,
@@ -1015,7 +1027,7 @@ class RandomForestClassifier(ForestClassifier):
                               "min_samples_leaf", "min_weight_fraction_leaf",
                               "max_features", "max_leaf_nodes",
                               "min_impurity_decrease", "min_impurity_split",
-                              "random_state"),
+                              "random_state", "splitter", "eps"),
             bootstrap=bootstrap,
             oob_score=oob_score,
             n_jobs=n_jobs,
@@ -1033,6 +1045,9 @@ class RandomForestClassifier(ForestClassifier):
         self.max_leaf_nodes = max_leaf_nodes
         self.min_impurity_decrease = min_impurity_decrease
         self.min_impurity_split = min_impurity_split
+
+        self.splitter = splitter
+        self.eps = eps
 
 
 class RandomForestRegressor(ForestRegressor):

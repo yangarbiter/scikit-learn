@@ -360,7 +360,8 @@ class BaseDecisionTree(BaseEstimator, MultiOutputMixin, metaclass=ABCMeta):
                                                 min_weight_leaf,
                                                 random_state,
                                                 self.presort,
-                                                eps=self.eps)
+                                                eps=self.eps,
+                                                )
 
         self.tree_ = Tree(self.n_features_, self.n_classes_, self.n_outputs_)
 
@@ -761,7 +762,8 @@ class DecisionTreeClassifier(BaseDecisionTree, ClassifierMixin):
                  min_impurity_decrease=0.,
                  min_impurity_split=None,
                  class_weight=None,
-                 presort=False):
+                 presort=False,
+                 eps=0.1):
         super().__init__(
             criterion=criterion,
             splitter=splitter,
@@ -775,7 +777,8 @@ class DecisionTreeClassifier(BaseDecisionTree, ClassifierMixin):
             random_state=random_state,
             min_impurity_decrease=min_impurity_decrease,
             min_impurity_split=min_impurity_split,
-            presort=presort)
+            presort=presort,
+            eps=eps)
 
     def fit(self, X, y, sample_weight=None, check_input=True,
             X_idx_sorted=None):

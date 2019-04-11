@@ -20,9 +20,10 @@ from ._criterion cimport Criterion
 
 from libc.stdlib cimport free
 from libc.stdlib cimport qsort
-from libc.stdlib cimport abs
 from libc.string cimport memcpy
 from libc.string cimport memset
+from libc.stdio cimport printf
+from libc.math cimport fabs, ceil, floor
 
 import numpy as np
 cimport numpy as np
@@ -62,7 +63,7 @@ cdef class Splitter:
 
     def __cinit__(self, Criterion criterion, SIZE_t max_features,
                   SIZE_t min_samples_leaf, double min_weight_leaf,
-                  object random_state, bint presort):
+                  object random_state, bint presort, double eps):
         """
         Parameters
         ----------
@@ -102,6 +103,8 @@ cdef class Splitter:
         self.random_state = random_state
         self.presort = presort
 
+        self.eps = eps
+
     def __dealloc__(self):
         """Destructor."""
 
@@ -120,7 +123,8 @@ cdef class Splitter:
                    object X,
                    DOUBLE_t[:, ::1] y,
                    DOUBLE_t* sample_weight,
-                   np.ndarray X_idx_sorted=None) except -1:
+                   np.ndarray X_idx_sorted=None,
+                   ) except -1:
         """Initialize the splitter.
 
         Take in the input data X, the target Y, and optional sample weights.
@@ -248,7 +252,7 @@ cdef class BaseDenseSplitter(Splitter):
 
     def __cinit__(self, Criterion criterion, SIZE_t max_features,
                   SIZE_t min_samples_leaf, double min_weight_leaf,
-                  object random_state, bint presort):
+                  object random_state, bint presort, double eps):
 
         self.X_idx_sorted_ptr = NULL
         self.X_idx_sorted_stride = 0
@@ -264,8 +268,7 @@ cdef class BaseDenseSplitter(Splitter):
                   object X,
                   DOUBLE_t[:, ::1] y,
                   DOUBLE_t* sample_weight,
-                  np.ndarray X_idx_sorted=None,
-                  DOUBLE_t eps=0.1) except -1:
+                  np.ndarray X_idx_sorted=None) except -1:
         """Initialize the splitter
 
         Returns -1 in case of failure to allocate memory (and raise MemoryError)
@@ -276,7 +279,6 @@ cdef class BaseDenseSplitter(Splitter):
         Splitter.init(self, X, y, sample_weight)
 
         self.X = X
-        self.eps = eps
 
         if self.presort == 1:
             self.X_idx_sorted = X_idx_sorted
@@ -861,7 +863,7 @@ cdef class BaseSparseSplitter(Splitter):
 
     def __cinit__(self, Criterion criterion, SIZE_t max_features,
                   SIZE_t min_samples_leaf, double min_weight_leaf,
-                  object random_state, bint presort):
+                  object random_state, bint presort, double eps):
         # Parent __cinit__ is automatically called
 
         self.X_data = NULL
@@ -1674,6 +1676,7 @@ cdef class RobustSplitter(BaseDenseSplitter):
         cdef double current_proxy_improvement = -INFINITY
         cdef double best_proxy_improvement = -INFINITY
 
+
         cdef SIZE_t f_i = n_features
         cdef SIZE_t f_j
         cdef SIZE_t tmp
@@ -1695,45 +1698,19 @@ cdef class RobustSplitter(BaseDenseSplitter):
         cdef SIZE_t partition_end
 
         cdef double eps = self.eps
-        cdef SIZE_t* Id=NULL
-        cdef SIZE_t* Ip=NULL
-        cdef SIZE_t* In=NULL
-        cdef SIZE_t n_d=0
-        cdef SIZE_t n_p=0
-        cdef SIZE_t n_n=0
-
-        cdef SIZE_t n_samples = end - start
-        cdef double min_diff=INFINITY
-        cdef SIZE_t ce
-        cdef SIZE_t fl
-        cdef SIZE_t n00
-        cdef SIZE_t n01
-        cdef SIZE_t N0=0
-        cdef SIZE_t N1=0
-        cdef SIZE_t dn1p
-        cdef SIZE_t n10
-        cdef SIZE_t n11
-
-        cdef SIZE_t best_dn0
-        cdef SIZE_t best_dn1
-        cdef SIZE_t dn0
-        cdef SIZE_t dn1,
         cdef SIZE_t best_j
-        cdef double best_score=0
-        cdef double score
-
-        safe_realloc(&Id, end - start)
-        safe_realloc(&Ip, end - start)
-        safe_realloc(&In, end - start)
+        cdef double best_score=-INFINITY
+        cdef SIZE_t* ret_samples = NULL
+        cdef SIZE_t* best_samples = NULL
 
         _init_split(&best, end)
 
-        for i in range(start, end):
-            if <int>self.y[i] == 0: N0 += 1
-            else: N1 += 1
+        safe_realloc(&ret_samples, end - start)
+        safe_realloc(&best_samples, end - start)
 
         for f_j in range(n_features):
             current.feature = features[f_j]
+            #printf("XDDDDD f_j=%d\n", f_j)
 
             for i in range(start, end):
                 Xf[i] = self.X[samples[i], current.feature]
@@ -1742,55 +1719,6 @@ cdef class RobustSplitter(BaseDenseSplitter):
             for f_i in range(start, end-1):
                 current.threshold = (Xf[f_i] + Xf[f_i+1]) / 2
 
-                for i in range(start, end):
-                    if Xf[i] < current.threshold - eps:
-                        In[n_n] = i
-                        n_n += 1
-                    elif Xf[i] > current.threshold + eps:
-                        Ip[n_p] = i
-                        n_p += 1
-                    else:
-                        Id[n_d] = i
-                        n_d += 1
-
-                n00=0
-                n01=0
-                n10=0
-                n11=0
-                for i in range(n_n):
-                    if <int>self.y[In[i]] == 0: n00 += 1
-                    else: n01 += 1
-                for i in range(n_p):
-                    if <int>self.y[Ip[i]] == 0: n10 += 1
-                    else: n11 += 1
-
-                ####################### get dn0s, dn1s
-                for dn0 in range(n_n):
-                    if <int>self.y[Id[dn0]] == 1:
-                        continue
-                    ce = <SIZE_t>(N1*(n00 + dn0)/N0 + 0.5) + n01
-                    fl = <SIZE_t>(N1*(n00 + dn0)/N0 - 0.5) + n01
-
-                    for dn1p in range(ce, fl):
-                        dn1 = max(min(dn1p, n00), 0)
-                        if min_diff > abs((dn0+n00)/N0 - (dn1+n01)/N1):
-                            best_dn0 = dn0
-                            best_dn1 = dn1
-                            min_diff = abs((dn0+n00)/N0 - (dn1+n01)/N1)
-                #######################
-            
-                score = (
-                        - (n_n + best_dn0) / n_samples * log((n_n + best_dn0) / n_samples) \
-                        - (n_p + best_dn1) / n_samples * log((n_p + best_dn1) / n_samples)
-                    ) - (
-                        (n_n + best_dn0) / n_samples * (
-                            ((n00 + best_dn0) / n_samples) * log((n00 + best_dn0) / n_samples) \
-                            + ((n01 + best_dn1) / n_samples) * log((n01 + best_dn1) / n_samples)
-                        ) - (n_p + best_dn1) / n_samples * (
-                            ((n10 + best_dn0) / n_samples) * log((n10 + best_dn0) / n_samples) \
-                            + ((n11 + best_dn1) / n_samples) * log((n11 + best_dn1) / n_samples)
-                        )
-                    )
                 current.feature = f_j
                 current.pos = f_i
 
@@ -1798,42 +1726,58 @@ cdef class RobustSplitter(BaseDenseSplitter):
                     ((end - current.pos) < min_samples_leaf)):
                     continue
 
+                self.criterion.reset()
+                self.criterion.update(current.pos)
+
+                # Reject if min_weight_leaf is not satisfied
+                if ((self.criterion.weighted_n_left < min_weight_leaf) or
+                        (self.criterion.weighted_n_right < min_weight_leaf)):
+                    continue
+
+                score = robust_entropy(Xf, current.threshold, current.feature,
+                                    samples, start, end, self.y, self.sample_weight,
+                                    self.eps, ret_samples)
                 if best_score < score:
                     best = current  # copy
-
+                    best_score = score
+                    #printf("!!!!!!!!!!!!!!!!!!!best_score=%f\n", best_score)
+                    for i in range(start, end):
+                        best_samples[i-start] = ret_samples[i-start]
 
         # Reorganize into samples[start:best.pos] + samples[best.pos:end]
         if best.pos < end:
-            p = 0
-            for i in range(n_n):
-                samples[p] = In[i]
-                p += 1
-            for i in range(n_d):
-                if <int>self.y[Id[i]] == 0:
-                    if best_dn0 > 0:
-                        samples[p] = Id[i]
-                        p += 1
-                        best_dn0 -= 1
-                    else:
-                        Ip[n_p] = Id[i]
-                        n_p += 1
-                else:
-                    if best_dn1 > 0:
-                        samples[p] = Id[i]
-                        p += 1
-                        best_dn1 -= 1
-                    else:
-                        Ip[n_p] = Id[i]
-                        n_p += 1
-            for i in range(n_p):
-                samples[p] = Ip[i]
-                p += 1
+            #for i in range(start, end):
+            #    samples[i] = best_samples[i-start]
 
-            #self.criterion.reset()
-            #self.criterion.update(best.pos)
-            #best.improvement = self.criterion.impurity_improvement(impurity)
-            #self.criterion.children_impurity(&best.impurity_left,
-            #                                 &best.impurity_right)
+            #best.improvement = impurity - best_score
+            ##printf("1\n")
+
+            #best.impurity_left = entropy(samples, start, best.pos, self.y, self.sample_weight)
+            ##printf("2\n")
+
+            #best.impurity_right = entropy(samples, best.pos, end, self.y, self.sample_weight)
+            ##printf("3\n")
+
+            partition_end = end
+            p = start
+
+            while p < partition_end:
+                if self.X[samples[p], best.feature] <= best.threshold:
+                    p += 1
+
+                else:
+                    partition_end -= 1
+
+                    tmp = samples[partition_end]
+                    samples[partition_end] = samples[p]
+                    samples[p] = tmp
+
+            self.criterion.reset()
+            self.criterion.update(best.pos)
+            best.improvement = self.criterion.impurity_improvement(impurity)
+            self.criterion.children_impurity(&best.impurity_left,
+                                             &best.impurity_right)
+
 
         # Respect invariant for constant features: the original order of
         # element in features[:n_known_constants] must be preserved for sibling
@@ -1845,11 +1789,276 @@ cdef class RobustSplitter(BaseDenseSplitter):
         #       features + n_known_constants,
         #       sizeof(SIZE_t) * n_found_constants)
 
-        free(Id)
-        free(Ip)
-        free(In)
+        free(best_samples)
+        free(ret_samples)
 
         # Return values
         split[0] = best
         n_constant_features[0] = n_total_constants
         return 0
+
+cdef double entropy(SIZE_t* samples,
+                    SIZE_t start,
+                    SIZE_t end,
+                    DOUBLE_t[:, ::1] y,
+                    DOUBLE_t* sample_weight,
+                ) nogil:
+    cdef SIZE_t i
+    cdef double wn0=0
+    cdef double wn1=0
+
+    for i in range(start, end):
+        if <int>(y[samples[i], 0]) == 0:
+            if sample_weight != NULL:
+                wn0 += sample_weight[samples[i]]
+            else:
+                wn0 += 1
+        else:
+            if sample_weight != NULL:
+                wn1 += sample_weight[samples[i]]
+            else:
+                wn1 += 1
+
+    return (
+        - (wn0 / (wn0+wn1)) * log(wn0 / (wn0+wn1)) \
+        - (wn1 / (wn0+wn1)) * log(wn1 / (wn0+wn1))
+    )
+
+
+
+cdef void get_label_counts(SIZE_t n, SIZE_t* I, DOUBLE_t[:, ::1] y, DOUBLE_t* sample_weight,
+                    SIZE_t* n0, SIZE_t* n1, double* wn0, double* wn1) nogil:
+    cdef SIZE_t i
+
+    for i in range(n):
+        if <int>(y[I[i], 0]) == 0:
+            n0[0] += 1
+            if sample_weight != NULL:
+                wn0[0] += sample_weight[I[i]]
+            else:
+                wn0[0] += 1
+        else:
+            n1[0] += 1
+            if sample_weight != NULL:
+                wn1[0] += sample_weight[I[i]]
+            else:
+                wn1[0] += 1
+
+
+cdef double robust_entropy(DTYPE_t* Xf, DTYPE_t threshold, SIZE_t feature,
+                    SIZE_t* samples, SIZE_t start, SIZE_t end,
+                    DOUBLE_t[:, ::1] y,
+                    DOUBLE_t* sample_weight,
+                    double eps,
+                    SIZE_t* ret_samples=NULL,
+                ) nogil:
+    cdef SIZE_t i
+    cdef SIZE_t j
+    cdef SIZE_t p
+    
+    cdef SIZE_t* Id=NULL
+    cdef SIZE_t* Ip=NULL
+    cdef SIZE_t* In=NULL
+    cdef SIZE_t n_d=0
+    cdef SIZE_t n_p=0
+    cdef SIZE_t n_n=0
+    cdef double wn_d=0
+    cdef double wn_p=0
+    cdef double wn_n=0
+
+    cdef SIZE_t n_samples = end - start
+    cdef double min_diff=INFINITY
+    cdef SIZE_t ce
+    cdef SIZE_t fl
+    cdef SIZE_t N0=0
+    cdef SIZE_t N1=0
+    cdef double wN0=0
+    cdef double wN1=0
+    cdef SIZE_t dn1p
+
+    cdef SIZE_t n00=0
+    cdef SIZE_t n01=0
+    cdef SIZE_t n10=0
+    cdef SIZE_t n11=0
+    cdef SIZE_t nd0=0
+    cdef SIZE_t nd1=0
+    cdef double wn00=0
+    cdef double wn01=0
+    cdef double wn10=0
+    cdef double wn11=0
+    cdef double wnd0=0
+    cdef double wnd1=0
+
+    cdef double best_dn0 = 0.
+    cdef double best_dn1 = 0.
+    cdef SIZE_t dn0
+    cdef double dn1
+    cdef double score
+    cdef double wn_samples
+    cdef double temp
+    cdef double il
+    cdef double ir
+
+    safe_realloc(&Id, end - start)
+    safe_realloc(&Ip, end - start)
+    safe_realloc(&In, end - start)
+
+    for i in range(start, end):
+        if <int>(y[i, 0]) == 0:
+            N0 += 1
+            if sample_weight != NULL:
+                wN0 += sample_weight[i]
+            else:
+                wN0 += 1
+        else:
+            N1 += 1
+            if sample_weight != NULL:
+                wN1 += sample_weight[i]
+            else:
+                wN1 += 1
+
+    for i in range(start, end):
+        if Xf[i] <= threshold - eps:
+            In[n_n] = samples[i]
+            n_n += 1
+            if sample_weight != NULL:
+                wn_n += sample_weight[samples[i]]
+            else:
+                wn_n += 1
+        elif Xf[i] >= threshold + eps:
+            Ip[n_p] = samples[i]
+            n_p += 1
+            if sample_weight != NULL:
+                wn_p += sample_weight[samples[i]]
+            else:
+                wn_p += 1
+        else:
+            Id[n_d] = samples[i]
+            n_d += 1
+            if sample_weight != NULL:
+                wn_d += sample_weight[samples[i]]
+            else:
+                wn_d += 1
+
+    get_label_counts(n_n, In, y, sample_weight, &n00, &n01, &wn00, &wn01)
+    get_label_counts(n_p, Ip, y, sample_weight, &n10, &n11, &wn10, &wn11)
+    get_label_counts(n_d, Id, y, sample_weight, &nd0, &nd1, &wnd0, &wnd1)
+
+    ####################### get dn0s, dn1s
+    min_diff = INFINITY
+    for dn0 in range(n_d):
+        if <int>(y[Id[dn0], 0]) == 1:
+            continue
+        ce = <SIZE_t>ceil(wN1*(wn00 + dn0)/wN0) + n01
+        fl = <SIZE_t>floor(wN1*(wn00 + dn0)/wN0) + n01
+
+        #printf("ce=%d, fl=%d\n", ce, fl)
+        for dn1p in range(fl, ce):
+            dn1 = max(min((<double>dn1p), wnd1), <double>0.)
+            temp = fabs((dn0+wn00)/wN0 - (dn1+wn01)/wN1)
+            #printf("temp=%f\n", temp)
+            if min_diff > temp:
+                best_dn0 = dn0
+                best_dn1 = dn1
+                min_diff = temp
+        #printf("min_diff=%f\n", min_diff)
+    #######################
+
+    wn_samples = wN0 + wN1
+    temp = (
+        - N0 / wn_samples * log(N0 / wn_samples) \
+        - N1 / wn_samples * log(N1 / wn_samples)
+    )
+    il = (wn_n + best_dn0 + best_dn1)
+    ir = (wn_p + wn_d - best_dn0 - best_dn1)
+    min_diff = 0
+    if ir == 0:
+        if ((wn00 + best_dn0) / il) > 0:
+            min_diff += - ((wn00 + best_dn0) / il) * log((wn00 + best_dn0) / il)
+        if ((wn01 + best_dn1) / il) > 0:
+            min_diff += - ((wn01 + best_dn1) / il) * log((wn01 + best_dn1) / il)
+        #min_diff = - (
+        #    ((wn00 + best_dn0) / il) * log((wn00 + best_dn0) / il) \
+        #    + ((wn01 + best_dn1) / il) * log((wn01 + best_dn1) / il)
+        #)
+    elif il == 0:
+        if ((wn10 + (wnd0-best_dn0)) / ir) > 0:
+            min_diff += - ((wn10 + (wnd0-best_dn0)) / ir) * log((wn10 + (wnd0-best_dn0)) / ir)
+        if ((wn11 + (wnd1-best_dn1)) / ir) > 0:
+            min_diff += - ((wn11 + (wnd1-best_dn1)) / ir) * log((wn11 + (wnd1-best_dn1)) / ir)
+        #min_diff = - (
+        #    ((wn10 + (wnd0-best_dn0)) / ir) * log((wn10 + (wnd0-best_dn0)) / ir) \
+        #    + ((wn11 + (wnd1-best_dn1)) / ir) * log((wn11 + (wnd1-best_dn1)) / ir)
+        #)
+    else:
+        if ((wn00 + best_dn0) / il) > 0:
+            min_diff += - il / wn_samples * (
+                ((wn00 + best_dn0) / il) * log((wn00 + best_dn0) / il)
+            )
+        if ((wn01 + best_dn1) / il) > 0:
+            min_diff += - il / wn_samples * (
+                ((wn01 + best_dn1) / il) * log((wn01 + best_dn1) / il)
+            )
+        if ((wn10 + (wnd0-best_dn0)) / ir) > 0:
+            min_diff += - ir / wn_samples * (
+                ((wn10 + (wnd0-best_dn0)) / ir) * log((wn10 + (wnd0-best_dn0)) / ir)
+            )
+        if ((wn11 + (wnd1-best_dn1)) / ir) > 0:
+            min_diff += - ir / wn_samples * (
+                ((wn11 + (wnd1-best_dn1)) / ir) * log((wn11 + (wnd1-best_dn1)) / ir)
+            )
+        #min_diff = (
+        #    - il / wn_samples * (
+        #        ((wn00 + best_dn0) / il) * log((wn00 + best_dn0) / il) \
+        #        + ((wn01 + best_dn1) / il) * log((wn01 + best_dn1) / il)
+        #    ) - ir / wn_samples * (
+        #        ((wn10 + (wnd0-best_dn0)) / ir) * log((wn10 + (wnd0-best_dn0)) / ir) \
+        #        + ((wn11 + (wnd1-best_dn1)) / ir) * log((wn11 + (wnd1-best_dn1)) / ir)
+        #    )
+        #)
+    score =  temp - min_diff
+
+    #printf("%f %f\n", temp, min_diff)
+    #printf("eta=%f, feature=%d\n", threshold, feature)
+    #printf("1=%f\n", ((wn00 + best_dn0) / il))
+    #printf("2=%f\n", ((wn01 + best_dn1) / il))
+    #printf("3=%f\n", ((wn10 + (wnd0-best_dn0)) / ir))
+    #printf("4=%f\n", ((wn11 + (wnd1-best_dn1)) / ir))
+    #printf("il=%f, ir=%f\n", il, ir)
+    #printf("wn_n=%f, wn_p=%f, wn_d=%f, best_dn0=%f, best_dn1=%f\n", wn_n, wn_p, wn_d, best_dn0, best_dn1)
+    #printf("wn_samples=%f, wn00=%f, wn01=%f, wn10=%f, wn11=%f\n", wn_samples, wn00, wn01, wn10, wn11)
+    #printf("wnd0=%f, wnd1=%f\n", wnd0, wnd1)
+    #printf("%f\n", score)
+    #printf("==============================================================\n")
+
+    if ret_samples != NULL:
+        p = 0
+        for i in range(n_n):
+            ret_samples[p] = In[i]
+            p += 1
+        for i in range(n_d):
+            if <int>(y[Id[i], 0]) == 0:
+                if best_dn0 > 0:
+                    ret_samples[p] = Id[i]
+                    p += 1
+                    best_dn0 -= 1
+                else:
+                    Ip[n_p] = Id[i]
+                    n_p += 1
+            else:
+                if best_dn1 > 0:
+                    ret_samples[p] = Id[i]
+                    p += 1
+                    best_dn1 -= 1
+                else:
+                    Ip[n_p] = Id[i]
+                    n_p += 1
+        for i in range(n_p):
+            ret_samples[p] = Ip[i]
+            p += 1
+
+    free(Id)
+    free(Ip)
+    free(In)
+
+    return score

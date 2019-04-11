@@ -62,7 +62,7 @@ cdef class Splitter:
     cdef bint presort                    # Whether to use presorting, only
                                          # allowed on dense data
 
-    cdef const DOUBLE_t[:, ::1] y
+    cdef DOUBLE_t[:, ::1] y
     cdef DOUBLE_t* sample_weight
 
     # The samples vector `samples` is maintained by the Splitter object such

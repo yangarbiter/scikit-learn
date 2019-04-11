@@ -502,7 +502,6 @@ cdef class ClassificationCriterion(Criterion):
             dest += self.sum_stride
             sum_total += self.sum_stride
 
-
 cdef class Entropy(ClassificationCriterion):
     r"""Cross Entropy impurity criterion.
 
