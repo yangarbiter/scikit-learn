@@ -1716,7 +1716,12 @@ cdef class RobustSplitter(BaseDenseSplitter):
                 Xf[i] = self.X[samples[i], current.feature]
             sort(Xf + start, samples + start, end - start)
 
+            j = start
             for f_i in range(start, end-1):
+                if Xf[j] > Xf[f_i+1] + FEATURE_THRESHOLD:
+                    continue
+                j = f_i
+
                 current.threshold = (Xf[f_i] + Xf[f_i+1]) / 2
 
                 current.feature = f_j
